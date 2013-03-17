@@ -10,6 +10,8 @@ module RateLimit
     config.allowed_ips     = []
     config.limit_by_method = false
 
+    attr_accessor :cache_key
+
     def initialize
       config.cache = Rails.cache unless config.cache.present?
       config.logger = Rails.logger unless config.logger.present?
@@ -18,11 +20,15 @@ module RateLimit
     def reached_limit?(controller, action, method, ip)
       return false if whitelisted_ip?(ip)
 
-      key       = cache_key(controller, action, method, ip)
-      attempts  = config.cache.read(key).to_i                 # nil.to_i => 0
-      attempts += 1                                           # increment by one
+      initialize_cache_key(controller, action, method, ip)
+      val = config.cache.read(self.cache_key)
 
-      config.cache.write(key, attempts, :expires_in => config.interval.to_i)
+      if val
+        return true if val == self.class.lockout_value
+      end
+
+      attempts = val.to_i + 1 
+      config.cache.write(self.cache_key, attempts, :expires_in => config.interval.to_i)
 
       if attempts > config.threshold
         lockout!
@@ -49,7 +55,7 @@ module RateLimit
 
     def lockout!
       config.logger.info "Calling lockout! for #{self.cache_key}"
-      config.cache.write(self.cache_key, self.class.lockout_value, config.lockout_period)
+      config.cache.write(@cache_key, self.class.lockout_value, :expires_in => config.lockout_period.to_i)
     end
     
     # TODO have this work for IP ranges as well, see:
@@ -58,10 +64,11 @@ module RateLimit
       config.allowed_ips.include?(ip)
     end
     
-    def cache_key(controller, action, method, ip)
+    def initialize_cache_key(controller, action, method, ip)
       request = "#{controller}##{action}"
       request = "#{method.upcase}_#{request}" if config.limit_by_method
-      "rate_limit/requests/#{ip}/#{request}"
+      self.cache_key = "rate_limit/requests/#{ip}/#{request}"
+      self.cache_key
     end
 
   end
